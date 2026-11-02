@@ -52,7 +52,7 @@
 #include <BLE2902.h>
 
 // ─── SERVER (Render) ─────────────────────────────────────────────────────────
-#define SERVER_HOST "learnpod-api.onrender.com"   // <-- your Render service URL
+#define SERVER_HOST "learnpod-c3.onrender.com"   // your Render service URL
 #define SERVER_PORT 443
 #define PC_MODE_HOLD_MS 3000   // hold PTT this long to enter BLE PC mode
 
