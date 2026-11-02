@@ -248,3 +248,44 @@ async def tts(request: Request):
             yield _meta_line(error=f"TTS stream error: {e}")
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
+
+
+@app.post("/ask")
+async def ask(request: Request):
+    """Wake-word mode: {"text": "..."} (prompt after the wake word) -> meta + PCM audio."""
+    _require_env()
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Body must be JSON")
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "Missing 'text'")
+
+    def _ask_pipeline():
+        reply = _llm(text)
+        print(f"[SRV] Ask: {text}")
+        print(f"[SRV] Reply: {reply}")
+        if not reply:
+            raise HTTPException(502, "LLM returned empty reply")
+        return text, reply
+
+    try:
+        transcript, reply = await run_in_threadpool(_ask_pipeline)
+    except HTTPException:
+        raise
+
+    def stream():
+        try:
+            tts_resp = _tts_start(reply)
+            yield _meta_line(transcript=transcript, reply=reply)
+            yield from _pcm_chunks(tts_resp)
+            tts_resp.close()
+        except HTTPException as e:
+            traceback.print_exc()
+            yield _meta_line(error=str(e.detail))
+        except Exception as e:
+            traceback.print_exc()
+            yield _meta_line(error=f"TTS stream error: {e}")
+
+    return StreamingResponse(stream(), media_type="application/octet-stream")

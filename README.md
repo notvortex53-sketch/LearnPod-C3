@@ -98,6 +98,7 @@ curl https://YOUR-SERVICE.onrender.com/ -X POST -H "Content-Type: application/oc
 | `POST /voice` | raw WAV (16 kHz mono 16-bit) | line 1: `{"transcript":…,"reply":…}` then raw PCM audio |
 | `POST /stt` | raw WAV | `{"text": "…"}` |
 | `POST /tts` | `{"text": "…"}` | line 1: `{"reply":…}` then raw PCM audio |
+| `POST /ask` | `{"text": "…"}` (wake-word prompt) | LLM reply spoken: meta + PCM audio |
 | `GET /health` | — | `{"ok": true}` |
 
 Keys stay on the server. The ESP32 sends **no** API keys anymore.
@@ -159,16 +160,32 @@ PC → Device: {"cmd":"exec","ok":true,"message":"Opened Chrome"}
 ## 3. Firmware
 
 1. Open `learnpod_c3_v5.ino`.
-2. Set `SERVER_HOST` to your Render URL host (e.g. `learnpod-api.onrender.com`).
+2. Set `SERVER_HOST` to your Render URL host (e.g. `learnpod-c3.onrender.com`).
 3. **No API keys in the firmware anymore.**
 4. Board: `ESP32C3 Dev Module`, enable **USB CDC On Boot**, Flash 4 MB.
-5. Flash. Then:
-   - **Hold PTT (~1 s), release → AI mode** (server full pipeline)
-   - **Hold PTT 3 s+ → PC mode (BLE)**: device advertises, PC app connects,
-     then hold PTT again to speak the command.
+7. Flash. Then:
 
-Usage flow for BLE PC mode:
-1. Start `learnpod_ble_pc.py` on the PC (leave it running).
+### Controls (from the factory)
+
+| Action | What happens |
+|---|---|
+| **Say "Hey LearnPod" / "Hey Buddy"** + your question (hands-free, always armed) | device answers through the server: STT → LLM → TTS |
+| Short hold PTT (~1 s), release → AI mode | 🎙️ record → server full pipeline → speaker plays answer |
+| Hold PTT 3 s+ → PC mode (BLE) | device advertises, PC app connects, hold PTT again to speak the command |
+| Hold FLASH on boot | 📶 WiFi selector |
+
+### Wake word details
+
+- Always listening while idle (PTT button keeps working exactly as before).
+- A ~2.5 s clip is uploaded on each speech burst; a false trigger is cheap and
+  silent — the screen briefly shows "Not a wake word". Sensitivity is tuned
+  inside `wakeStep()` (`WAKE_MIN_LEVEL`, `WAKE_RUN_FRAMES`).
+- Render free-tier cold start applies to wake too — the first command after a
+  long sleep is slow; a `/health` keep-alive ping fixes that.
+
+### Usage flow for BLE PC mode
+
+1. Start `START_LEARNPOD_PC.bat` on the PC (leave the window open).
 2. On the device: hold PTT ~3 s → "PC Mode (BLE) — waiting for PC".
 3. PC connects → "Hold PTT to speak command" → press & hold PTT, speak.
 4. Command goes to the PC over BLE; result is spoken back via server TTS.

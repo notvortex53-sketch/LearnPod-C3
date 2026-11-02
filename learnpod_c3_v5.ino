@@ -1,10 +1,17 @@
 /*
- * LearnPod AI — ESP32-C3 Mini  (v5 — Server pipeline + BLE PC mode)
+ * LearnPod AI — ESP32-C3 Mini  (v5 — Server pipeline + BLE PC mode + Wake word)
  *
  * PIPELINE (AI mode):
  *   PTT -> INMP441 (I2S) record -> ONE HTTPS upload to Render server ->
  *   server does ElevenLabs STT -> Groq LLM -> ElevenLabs TTS ->
  *   streams 16 kHz PCM back -> played on MAX98357A, captions on SSD1306.
+ *
+ * WAKE WORD (always on while idle — no button needed):
+ *   Says "Hey LearnPod" or "Hey Buddy" + your question, e.g.
+ *   "Hey Buddy, what's the capital of France?"
+ *   Device listens continuously (energy VAD + 1.2 s pre-roll), sends the
+ *   clip to the server, STT confirms the wake word, then the remainder
+ *   goes to /ask (LLM) and the answer is spoken. PTT still works normally.
  *
  * PC MODE (BLE — replaces learnpod_pc.py over WiFi):
  *   Hold PTT 3 s -> device advertises BLE "LearnPod-C3" (Nordic UART Serv.)
@@ -124,6 +131,26 @@ static volatile bool       bleConnected = false;
 static String              bleLastLine  = "";
 static volatile bool       bleLineFresh = false;
 static String              bleIncoming  = "";
+
+// ─── WAKE WORD ENGINE ("Hey LearnPod" / "Hey Buddy") ─────────────────────────
+#define WAKE_FRAME_SAMPLES 160    // 10 ms frames at 16 kHz
+#define WAKE_PREROLL_BYTES 38400  // 1.2 s pre-roll (16-bit mono 16 kHz)
+#define WAKE_CLIP_BYTES    80000  // 2.5 s total clip sent to the server
+#define WAKE_RUN_FRAMES    5      // 50 ms of sustained sound triggers a check
+#define WAKE_MIN_LEVEL     800    // absolute floor: quieter than speech
+#define WAKE_SILENCE_MAX   40     // 400 ms of silence ends the clip early
+enum WakePhase { WAKE_SCAN, WAKE_CAPTURE, WAKE_BACKOFF };
+static WakePhase wakePhase        = WAKE_SCAN;
+static uint8_t   wakeRing[WAKE_PREROLL_BYTES];   // circular pre-roll
+static size_t    wakeRingPos      = 0;
+static bool      wakeRingFull     = false;
+static uint8_t   wakeSpeechRun    = 0;
+static uint8_t   wakeSilenceRun   = 0;
+static uint32_t  wakeNoiseFloor   = 300;
+static uint32_t  wakeBackoffUntil = 0;
+static size_t    wakeClipLen      = 0;
+static bool      wakeMicArmed     = false;
+static int16_t   wakeFrame16[WAKE_FRAME_SAMPLES];
 
 // ═════════════════════════════════════════════════════════════════════════════
 // FACE DRAWING
@@ -575,6 +602,7 @@ void switchToMic() {
 void switchToAmp() {
   i2s_driver_uninstall(I2S_NUM_0);
   initAmp();
+  wakeMicArmed = false;  // wake engine must re-arm mic driver next pass
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -837,6 +865,211 @@ bool serverSpeak(const String& text) {
   return true;
 }
 
+// ─── Wake-word mode: send text prompt to /ask, play LLM TTS ───────────────────
+bool serverAsk(const String& text) {
+  oledMsg("Thinking on server", "", "", FACE_THINK);
+
+  StaticJsonDocument<512> req;
+  req["text"] = text;
+  String body;
+  serializeJson(req, body);
+
+  String head = String("POST /ask HTTP/1.1\r\nHost: ") + SERVER_HOST +
+    "\r\nContent-Type: application/json\r\nContent-Length: " + String(body.length()) +
+    "\r\nConnection: close\r\n\r\n";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  if (!client.connect(SERVER_HOST, SERVER_PORT)) {
+    oledMsg("Server fail", "connect err", "", FACE_ERROR); delay(1500); return false;
+  }
+  client.print(head);
+  client.print(body);
+
+  switchToAmp();
+
+  String status;
+  if (!skipHttpHeaders(client, status)) {
+    oledMsg("Server API err", "check Render logs", "", FACE_ERROR); delay(1500); return false;
+  }
+
+  String meta = client.readStringUntil('\n');
+  Serial.println("[SRV] Meta: " + meta);
+  StaticJsonDocument<768> md;
+  if (deserializeJson(md, meta)) {
+    oledMsg("Server meta err", "", "", FACE_ERROR); delay(1500); return false;
+  }
+  String reply = md["reply"] | "";
+  const char* err = md["error"];
+  if (err && reply.isEmpty()) {
+    String e = String(err);
+    oledCaption("SRV: " + e, FACE_ERROR);
+    delay(2500);
+    return false;
+  }
+  if (reply.isEmpty()) {
+    oledMsg("Empty reply", "", "", FACE_ERROR); delay(1500); return false;
+  }
+
+  Serial.println("Bot:  " + reply);
+  oledCaption("Bot: " + reply);
+  streamPcmToSpeaker(client);
+  return true;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// WAKE WORD ENGINE
+// Always-on while idle: 10 ms energy frames -> sustained speech -> pre-roll
+// clip sent to server STT -> matches "hey learnpod"/"hey buddy" (any position)
+// -> remainder becomes the prompt for /ask. PTT button keeps working normally.
+// ═════════════════════════════════════════════════════════════════════════════
+
+static void wakeAppendRing(const int16_t* s, int cnt) {
+  size_t bytes = (size_t)cnt * 2;
+  size_t space = WAKE_PREROLL_BYTES - wakeRingPos;
+  size_t take  = (bytes > space) ? space : bytes;
+  memcpy(wakeRing + wakeRingPos, (const uint8_t*)s, take);
+  wakeRingPos += take;
+  if (bytes > take) {                       // wrapped
+    memcpy(wakeRing, ((const uint8_t*)s) + take, bytes - take);
+    wakeRingPos = bytes - take;
+    wakeRingFull = true;
+  }
+}
+
+// Copy ring (oldest first) into dst; returns bytes copied
+static size_t wakeCopyRing(int16_t* dst) {
+  if (!wakeRingFull) {
+    memcpy(dst, wakeRing, wakeRingPos);
+    return wakeRingPos;
+  }
+  size_t head = WAKE_PREROLL_BYTES - wakeRingPos;
+  memcpy(dst, wakeRing + wakeRingPos, head);
+  memcpy(((uint8_t*)dst) + head, wakeRing, wakeRingPos);
+  return WAKE_PREROLL_BYTES;
+}
+
+// Find wake word in a transcript; returns true and puts the text AFTER the
+// wake word into prompt (lowercased, punctuation stripped).
+static bool wakeSplit(const String& t, String& prompt) {
+  String s = t;
+  s.toLowerCase();
+  const char* punct = ",.!?;:\"'()";
+  for (const char* p = punct; *p; p++) s.replace(String(*p), " ");
+  while (s.indexOf("  ") >= 0) s.replace("  ", " ");
+  s.trim();
+
+  const char* variants[] = { "learnpod", "learn pod", "buddy" };
+  int best = -1; int bestLen = 0;
+  for (const char* v : variants) {
+    int p = s.indexOf(v);
+    if (p >= 0 && (best < 0 || p < best)) { best = p; bestLen = (int)strlen(v); }
+  }
+  if (best < 0) return false;
+  prompt = s.substring(best + bestLen);
+  prompt.trim();
+  return true;
+}
+
+// One-shot: STT the captured clip, act on it. Blocking (allowed: we're idle).
+static void processWakeClip() {
+  String text = serverSTT();
+  Serial.println("[WW] Heard: " + text + "  (len " + String(audioLen) + ")");
+
+  String prompt;
+  if (text.isEmpty() || !wakeSplit(text, prompt)) {
+    // not the wake word -> ignore silently, tiny face reset
+    oledMsg("LearnPod", "Not a wake word", "", FACE_IDLE);
+    delay(600);
+    return;
+  }
+
+  Serial.println("[WW] Wake word OK. Prompt: " + prompt);
+
+  if (prompt.length() < 2) {
+    // Wake word alone: politely answer and re-arm
+    oledMsg("Yes?", "", "", FACE_IDLE);
+    switchToAmp();
+    serverSpeak("Yes? I'm listening.");
+    return;
+  }
+
+  Serial.println("User: " + prompt);
+  oledCaption("You: " + prompt, FACE_THINK);
+  delay(300);
+  serverAsk(prompt);
+}
+
+// Called from loop() when idle. Reads one 10 ms mic frame per pass — keeps
+// the loop responsive to PTT and Serial.
+void wakeStep() {
+  if (wakePhase == WAKE_BACKOFF) {
+    if (millis() < wakeBackoffUntil) return;
+    wakePhase = WAKE_SCAN;
+    wakeRingPos  = 0; wakeRingFull = false;
+    wakeSpeechRun = 0; wakeSilenceRun = 0;
+  }
+
+  // Amp steals I2S after playback; re-arm the mic driver lazily
+  if (!wakeMicArmed) { switchToMic(); wakeMicArmed = true; wakeRingPos = 0; wakeRingFull = false; }
+
+  // One 10 ms frame (fails open if DMA not ready yet)
+  int32_t raw32[WAKE_FRAME_SAMPLES];
+  size_t n = 0;
+  i2s_read(I2S_MIC_PORT, raw32, sizeof(raw32), &n, pdMS_TO_TICKS(10));
+  if (n < sizeof(raw32)) return;
+
+  int cnt = n / 4;
+  uint32_t sum = 0;
+  for (int i = 0; i < cnt; i++) {
+    int16_t v = (int16_t)(raw32[i] >> 16);
+    wakeFrame16[i] = v;
+    sum += (v < 0) ? -v : v;
+  }
+  uint32_t lvl = sum / (uint32_t)cnt;
+
+  // Adaptive noise floor: tracks down quickly, creeps up slowly
+  if (lvl < wakeNoiseFloor)              wakeNoiseFloor = (wakeNoiseFloor * 95  + lvl * 5) / 100;
+  else if (lvl < wakeNoiseFloor * 3)     wakeNoiseFloor = (wakeNoiseFloor * 995 + lvl * 5) / 1000;
+
+  bool speech = (lvl > wakeNoiseFloor * 4) && (lvl > WAKE_MIN_LEVEL);
+
+  if (wakePhase == WAKE_SCAN) {
+    wakeAppendRing(wakeFrame16, cnt);
+    wakeSpeechRun = speech ? (uint8_t)(wakeSpeechRun + 1) : 0;
+    if (wakeSpeechRun >= WAKE_RUN_FRAMES) {
+      // Triggered: ring already holds ~1.2 s of context (pre-roll)
+      if (!audioBuf) {
+        audioBuf = (uint8_t*)malloc(MAX_AUDIO_BYTES);
+        if (!audioBuf) { wakeBackoffUntil = millis() + 4000; wakePhase = WAKE_BACKOFF; return; }
+      }
+      wakeClipLen = wakeCopyRing((int16_t*)audioBuf);
+      wakeSilenceRun = 0;
+      oledMsg("Wake?", "listening...", "", FACE_LISTEN);
+      wakePhase = WAKE_CAPTURE;
+    }
+
+  } else if (wakePhase == WAKE_CAPTURE) {
+    // Append live audio into the clip: pre-roll + live = up to 2.5 s
+    size_t space = MAX_AUDIO_BYTES - wakeClipLen;
+    size_t want  = (size_t)cnt * 2;
+    size_t take  = (want > space) ? space : want;
+    memcpy(audioBuf + wakeClipLen, (const uint8_t*)wakeFrame16, take);
+    wakeClipLen  += take;
+    wakeSilenceRun = speech ? 0 : (uint8_t)(wakeSilenceRun + 1);
+
+    bool fullOrQuiet =
+      (wakeClipLen >= WAKE_CLIP_BYTES) ||
+      (wakeSilenceRun >= WAKE_SILENCE_MAX && wakeClipLen >= WAKE_CLIP_BYTES / 2);
+    if (fullOrQuiet) {
+      audioLen = wakeClipLen;
+      wakeBackoffUntil = millis() + 2500;
+      wakePhase = WAKE_BACKOFF;
+      processWakeClip();
+    }
+  }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // BLE — Nordic UART Service, PC mode peripheral
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1085,8 +1318,13 @@ void loop() {
     }
   }
 
-  // ── PTT detection ─────────────────────────────────────────────────────────
-  if (digitalRead(PTT_PIN) != LOW) { delay(20); return; }
+  // ── PTT detection + WAKE WORD listening ──────────────────────────────────
+  if (digitalRead(PTT_PIN) != LOW) {
+    // Idle: one 10 ms mic frame in -> wake word engine ("Hey LearnPod"/"Hey Buddy")
+    wakeStep();
+    delay(2);
+    return;
+  }
   delay(50);  // debounce
   if (digitalRead(PTT_PIN) != LOW) return;
 
