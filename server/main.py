@@ -43,7 +43,7 @@ ELEVEN_TTS_MODEL = os.getenv("ELEVEN_TTS_MODEL", "eleven_turbo_v2")
 ELEVEN_TTS_FORMAT = os.getenv("ELEVEN_TTS_FORMAT", "pcm_16000")
 ELEVEN_STT_MODEL = os.getenv("ELEVEN_STT_MODEL", "scribe_v1")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-27b")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
 SYSTEM_PROMPT = (
     "You are LearnPod, a concise voice AI assistant. "
