@@ -41,6 +41,7 @@ ELEVEN_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVEN_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 ELEVEN_TTS_MODEL = os.getenv("ELEVEN_TTS_MODEL", "eleven_turbo_v2")
 ELEVEN_TTS_FORMAT = os.getenv("ELEVEN_TTS_FORMAT", "pcm_16000")
+ELEVEN_STT_MODEL = os.getenv("ELEVEN_STT_MODEL", "scribe_v1")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-27b")
 
@@ -85,6 +86,7 @@ def _stt(wav_bytes: bytes) -> str:
         "https://api.elevenlabs.io/v1/speech-to-text",
         headers={"xi-api-key": ELEVEN_API_KEY},
         files={"file": ("audio.wav", io.BytesIO(wav_bytes), "audio/wav")},
+        data={"model_id": ELEVEN_STT_MODEL},
         timeout=30,
     )
     if r.status_code != 200:
