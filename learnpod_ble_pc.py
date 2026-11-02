@@ -232,14 +232,14 @@ async def run() -> None:
             continue
 
         print(f"Found {BLE_DEVICE_NAME}. Connecting...")
+        stop = asyncio.Event()
         try:
-            async with BleakClient(device) as client:
+            async with BleakClient(
+                device, disconnected_callback=lambda _c: stop.set()
+            ) as client:
                 learnpod.client = client
                 learnpod._buffer = bytearray()
                 print("Connected to LearnPod!")
-
-                stop = asyncio.Event()
-                client.set_disconnected_callback(lambda _c: stop.set())
 
                 await client.start_notify(NUS_TX_CHAR, learnpod._on_notify)
                 await learnpod.send({"cmd": "ping"})  # let device know we're here
