@@ -58,7 +58,20 @@ Keys stay on the server. The ESP32 sends **no** API keys anymore.
 
 ---
 
-## 2. PC side — BLE controller
+## 2. PC side — the easy way (for everyone) 👉 just double-click
+
+**`START_LEARNPOD_PC.bat`** — one double-click does it all:
+
+1. Finds Python on the PC (or opens the download page if it's missing)
+2. Installs the required components automatically — once, silently
+3. Starts the Bluetooth controller with clear on-screen instructions
+
+> Keep the black window open — closing it stops PC control.
+> Nothing to type, ever.
+
+---
+
+### Power-user way (same thing, manual)
 
 ```powershell
 pip install bleak pyautogui
