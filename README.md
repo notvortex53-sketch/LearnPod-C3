@@ -21,6 +21,52 @@ NEW:  ESP32 ── ONE HTTPS ──▶ Render server ──▶ STT + LLM + TTS �
 
 ---
 
+## 0. Wiring (ESP32-C3 Super Mini)
+
+```
+                        ESP32-C3 Super Mini
+                    ┌─────────────────────────┐
+                    │                         │
+   INMP441 mic ────▶│ GPIO6 SCK               │───▶ OLED SDA = GPIO8
+   ("clock")        │ GPIO7 WS                │───▶ OLED SCL = GPIO9
+   ("ws")           │ GPIO5 SD                │      PTT btn = GPIO10 ↔ GND
+                    │ GPIO4 BCLK  ◀──── MAX98357A amp
+                    │ GPIO3 LRC   ◀────     "
+                    │ GPIO2 DIN   ◀────     "
+                    │ 3V3 / GND  → power for mic + OLED
+                    └─────────────────────────┘
+```
+
+| Module | Module pin | ESP32-C3 pin |
+|---|---|---|
+| INMP441 mic (I2S in) | VCC | 3V3 |
+| | GND | GND |
+| | SCK | GPIO6 |
+| | WS | GPIO7 |
+| | SD | GPIO5 |
+| | L/R | **GND** (selects Left channel — required) |
+| MAX98357A amp (I2S out) | VIN | 5V (or 3V3 — quieter) |
+| | GND | GND |
+| | BCLK | GPIO4 |
+| | LRC | GPIO3 |
+| | DIN | GPIO2 |
+| | GAIN | **GND** (12 dB) |
+| | Speaker + / − | speaker terminals |
+| SSD1306 OLED 128×64 (I2C) | VCC | 3V3 |
+| | GND | GND |
+| | SDA | GPIO8 |
+| | SCL | GPIO9 |
+| PTT button | one leg | GPIO10 |
+| | other leg | GND *(input-pullup — no resistor needed)* |
+
+Notes:
+- OLED **SDA=8 / SCL=9** — yes, GPIO9 doubles as the built-in BOOT/FLASH button; it works because the display holds the line high. If the board ever fails to boot, unplug the OLED and reboot once.
+- PTT is any momentary push-to-talk button; firmware uses the internal pull-up.
+- I2S wires are short (<10 cm) and keep SCK/WS away from power rails — audio clicking usually means long or crossed I2S wires.
+- GAIN floating = 9 dB, tied to GND = 12 dB, tied to VIN = 15 dB.
+
+---
+
 ## 1. Deploy the server to Render
 
 1. Put the `server/` folder in a GitHub repo.
