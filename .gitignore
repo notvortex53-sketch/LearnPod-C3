@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE / build artifacts
+.vscode/
+.idea/
+build/
+*.elf
+*.bin
+
+# OS
+Thumbs.db
+.DS_Store
