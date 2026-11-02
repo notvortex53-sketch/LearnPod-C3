@@ -26,6 +26,7 @@ import io
 import json
 import os
 import re
+import traceback
 import wave
 
 import requests
@@ -178,10 +179,17 @@ async def voice(request: Request):
         raise
 
     def stream():
-        tts = _tts_start(reply)
-        yield _meta_line(transcript=transcript, reply=reply)
-        yield from _pcm_chunks(tts)
-        tts.close()
+        try:
+            tts = _tts_start(reply)
+            yield _meta_line(transcript=transcript, reply=reply)
+            yield from _pcm_chunks(tts)
+            tts.close()
+        except HTTPException as e:
+            traceback.print_exc()
+            yield _meta_line(error=str(e.detail))
+        except Exception as e:
+            traceback.print_exc()
+            yield _meta_line(error=f"TTS stream error: {e}")
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
 
@@ -227,9 +235,16 @@ async def tts(request: Request):
         raise HTTPException(400, "Missing 'text'")
 
     def stream():
-        tts_resp = _tts_start(text)
-        yield _meta_line(reply=text)
-        yield from _pcm_chunks(tts_resp)
-        tts_resp.close()
+        try:
+            tts_resp = _tts_start(text)
+            yield _meta_line(reply=text)
+            yield from _pcm_chunks(tts_resp)
+            tts_resp.close()
+        except HTTPException as e:
+            traceback.print_exc()
+            yield _meta_line(error=str(e.detail))
+        except Exception as e:
+            traceback.print_exc()
+            yield _meta_line(error=f"TTS stream error: {e}")
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
