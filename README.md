@@ -12,7 +12,7 @@ NEW:  ESP32 ── ONE HTTPS ──▶ Render server ──▶ STT + LLM + TTS �
 
 | File | What it is |
 |---|---|
-| `learnpod_esp32_v6.ino` | Firmware for **classic ESP32** boards (Dev Module / D1 R32 / WROOM) |
+| `learnpod_esp32_v6.ino` | Firmware for **classic ESP32** boards (Dev Module / D1 R32 / WROOM) — includes Bluetooth headphones (A2DP) output |
 | `learnpod_c3_v5.ino` | Firmware for ESP32-**C3** Super Mini |
 | `server/main.py` | FastAPI backend — runs the full AI pipeline |
 | `server/requirements.txt` | Python deps for Render |
@@ -198,9 +198,11 @@ Both variants behave identically — pick the file matching your board:
 2. `SERVER_HOST` is already `learnpod-c3.onrender.com` — fine if that's your Render app.
 3. **No API keys in the firmware.**
 4. Board: `ESP32 Dev Module`.
-5. ⚠️ **Partition Scheme: `Huge APP (3MB No OTA/1MB SPIFFS)`** — required:
-   BLE + WiFi + TLS won't fit in the default 1.2 MB app partition.
-6. Flash. Then follow the controls below.
+5. **Partition Scheme: `Huge APP (3MB No OTA/1MB SPIFFS)`** — required:
+   BLE + WiFi + TLS + Bluetooth Classic audio won't fit the default 1.2 MB.
+6. **Library Manager: install `ESP32-A2DP`** (Phil Schatzmann) — needed for the
+   Bluetooth headphones feature.
+7. Flash. Then follow the controls below.
 
 **ESP32-C3 Super Mini:** `learnpod_c3_v5.ino`
 
@@ -217,7 +219,29 @@ Then:
 | **Say "Hey LearnPod" / "Hey Buddy"** + your question (hands-free, always armed) | device answers through the server: STT → LLM → TTS |
 | Short hold PTT (~1 s), release → AI mode | 🎙️ record → server full pipeline → speaker plays answer |
 | Hold PTT 3 s+ → PC mode (BLE) | device advertises, PC app connects, hold PTT again to speak the command |
+| **Hold PTT 8 s → 🔵 Bluetooth audio pairing** | scans nearby headphones/speakers, tap = next, HOLD 1.5 s = connect & save |
 | Hold FLASH/BOOT button on boot | 📶 WiFi selector |
+
+### Bluetooth headphones / speaker ("like headphones") 🔵 — classic ESP32 only
+
+The device connects **to** your Bluetooth headphones or speaker (A2DP **source**)
+and the bot's voice plays there instead of the wired speaker.
+
+**One-time setup (firmware step, do while flashing):**
+Arduino IDE → Library Manager → install **"ESP32-A2DP" by Phil Schatzmann** —
+the classic-ESP32 firmware (`learnpod_esp32_v6.ino`) won't compile without it.
+
+**Day-to-day use:**
+1. Put your headphones/speaker into **pairing mode** (check its manual — usually holding its power or play button until the LED blinks fast).
+2. On the LearnPod: **hold PTT 8 s** → device scans nearby audio devices.
+3. Tap PTT to cycle through found names → **hold 1.5 s** to connect. That device is **saved**.
+4. From now on: every boot auto-reconnects, and whenever your headphones are powered on, the LearnPod's voice plays in them automatically — wake word, PTT AI and PC-mode results all included.
+
+Notes:
+- While headphones are connected, the **wired speaker goes quiet** (no dual output).
+- **Classic ESP32 only** — the C3 has no Bluetooth Classic, this feature can't exist on it. The C3 firmware is untouched.
+- To re-pair different headphones, hold PTT 8 s again and pick a new one.
+- With the BT stack resident, the record buffer auto-falls-back from 5 s to 3 s if heap is tight (all normal on free RAM terms; you'll never need to touch it).
 
 ### Wake word details
 
