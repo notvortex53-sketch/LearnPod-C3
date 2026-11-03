@@ -8,7 +8,8 @@ Everything about wiring, WiFi, wake word and PC mode is documented in the main
 3. Open `LearnPod32.ino` → Flash
 4. Hold the **BOOT button ~2 s** while running → WiFi selector
 5. Controls:
-   - Tap PTT (≤1 s) → talk to the AI ("Hey LearnPod" works hands-free too)
+   - **Tap PTT, release, then speak** → AI mode (recording ends on a 1 s pause,
+     or tap PTT again to end early). Don't hold while talking — 3 s hold = PC mode.
    - Hold PTT 3 s → PC control mode (run `START_LEARNPOD_PC.bat` on the PC)
    - `ADD:ssid:password` over Serial Monitor → add a WiFi network
 

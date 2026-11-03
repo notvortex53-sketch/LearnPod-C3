@@ -2,7 +2,9 @@
  * LearnPod AI — ESP32-C3 Mini  (v5 — Server pipeline + BLE PC mode + Wake word)
  *
  * PIPELINE (AI mode):
- *   PTT -> INMP441 (I2S) record -> ONE HTTPS upload to Render server ->
+ *   TAP PTT (release it — don't hold!) -> hands-free recording starts ->
+ *   speak your sentence -> it ends on a 1 s pause (or tap PTT again) ->
+ *   ONE HTTPS upload to Render server ->
  *   server does ElevenLabs STT -> Groq LLM -> ElevenLabs TTS ->
  *   streams 16 kHz PCM back -> played on MAX98357A, captions on SSD1306.
  *
@@ -139,6 +141,11 @@ static String              bleIncoming  = "";
 #define WAKE_RUN_FRAMES    5      // 50 ms of sustained sound triggers a check
 #define WAKE_MIN_LEVEL     800    // absolute floor: quieter than speech
 #define WAKE_SILENCE_MAX   40     // 400 ms of silence ends the clip early
+
+// Tap-to-talk recording (hands-free — uses the same VAD idea as the wake word)
+#define TAP_SILENCE_MAX   100     // 100 x 10 ms = 1.0 s pause ends the recording
+#define TAP_MIN_SPEAK     30      // need >=0.3 s of voice, else the clip is junk
+#define TAP_QUIET_BAIL_MS 4000    // tapped but never spoke -> give up after 4 s
 enum WakePhase { WAKE_SCAN, WAKE_CAPTURE, WAKE_BACKOFF };
 static WakePhase wakePhase        = WAKE_SCAN;
 static uint8_t   wakeRing[WAKE_PREROLL_BYTES];   // circular pre-roll
@@ -656,6 +663,71 @@ bool recordAudio() {
   if (audioLen < 3200) {
     oledMsg("Too short,", "hold longer");
     delay(1000);
+    return false;
+  }
+  return true;
+}
+
+// Hands-free recording for TAP-TO-TALK: tap PTT, release, then speak.
+// Ends automatically after a 1 s pause, at the 5 s buffer cap, or if PTT is
+// pressed again ("tap again = end early"). Only the deliberate 3 s HOLD
+// triggers PC mode, so sentences can be any length while talking.
+bool recordAudioFree() {
+  if (!audioBuf) {
+    audioBuf = (uint8_t*)malloc(MAX_AUDIO_BYTES);
+    if (!audioBuf) { oledMsg("ERR: no memory"); return false; }
+  }
+  audioLen = 0;
+  oledMsg("Listening...", "pause 1s = done", "tap again = end", FACE_LISTEN);
+
+  int32_t  raw32[WAKE_FRAME_SAMPLES];
+  uint32_t floorLvl = (wakeNoiseFloor > WAKE_MIN_LEVEL) ? wakeNoiseFloor
+                                                       : WAKE_MIN_LEVEL;
+  uint32_t speakTotal   = 0;   // voiced frames so far
+  uint32_t silenceRun   = 0;   // consecutive silent frames after speaking
+  bool     talked       = false;
+  unsigned long started = millis();
+
+  while (audioLen < MAX_AUDIO_BYTES - WAKE_FRAME_SAMPLES * 2) {
+    size_t n = 0;
+    i2s_read(I2S_MIC_PORT, raw32, sizeof(raw32), &n, portMAX_DELAY);
+    if (n < sizeof(raw32)) continue;
+    int      cnt   = n / 4;
+    int16_t* out16 = (int16_t*)audioBuf;
+    uint32_t sum   = 0;
+    for (int i = 0; i < cnt && audioLen < MAX_AUDIO_BYTES; i++) {
+      int16_t v = (int16_t)(raw32[i] >> 16);
+      out16[audioLen / 2] = v;
+      audioLen += 2;
+      sum += (v < 0) ? -v : v;
+    }
+    uint32_t lvl = sum / (uint32_t)cnt;
+
+    // Same adaptive floor as the wake word engine (fast down, slow up)
+    if (lvl < floorLvl)          floorLvl = (floorLvl * 95  + lvl * 5) / 100;
+    else if (lvl < floorLvl * 3) floorLvl = (floorLvl * 995 + lvl * 5) / 1000;
+
+    bool speech = (lvl > floorLvl * 4) && (lvl > WAKE_MIN_LEVEL);
+    if (speech) { talked = true; silenceRun = 0; speakTotal++; }
+    else if (talked) { silenceRun++; }
+
+    // Deterministic end: tap PTT again
+    if (digitalRead(PTT_PIN) == LOW) break;
+
+    if (silenceRun >= TAP_SILENCE_MAX && speakTotal >= TAP_MIN_SPEAK) break;
+
+    // Tapped by accident / too far from the mic: don't waste an upload
+    if (!talked && millis() - started > TAP_QUIET_BAIL_MS) {
+      oledMsg("Too quiet", "tap, then speak", "a bit louder", FACE_IDLE);
+      delay(1200);
+      return false;
+    }
+  }
+
+  oledMsg("Processing...", "", "", FACE_THINK);
+  if (!talked || speakTotal < TAP_MIN_SPEAK || audioLen < 8000) {
+    oledMsg("No speech", "tap, then talk", "after releasing");
+    delay(1200);
     return false;
   }
   return true;
@@ -1319,7 +1391,7 @@ void setup() {
   // I2S — start in mic mode (amp switched in when needed)
   initMic();
 
-  oledMsg("LearnPod Ready", "Hold PTT", "to talk (BLE 3s=PC)", FACE_IDLE);
+  oledMsg("LearnPod Ready", "Tap PTT", "3s hold = PC", FACE_IDLE);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1367,36 +1439,32 @@ void loop() {
   delay(50);  // debounce
   if (digitalRead(PTT_PIN) != LOW) return;
 
-  // Measure how long PTT is held before release OR until PC_MODE_HOLD_MS
+  // Wait for the press to end (hands-free talk), unless it crossed 3 s
   unsigned long pressStart = millis();
   bool pcMode = false;
 
   while (digitalRead(PTT_PIN) == LOW) {
     unsigned long held = millis() - pressStart;
     if (held >= PC_MODE_HOLD_MS && !pcMode) {
-      // Crossed threshold -> switch to PC mode UI
+      // Crossed threshold -> deliberate gesture, this is PC mode
       pcMode = true;
       oledMsg("PC Mode", "BLE starting...", "", FACE_LISTEN);
     }
     delay(10);
   }
 
-  // ── PC AUTOMATION MODE (over BLE) ─────────────────────────────────────────
+  // ── PC AUTOMATION MODE (over BLE, entered by holding PTT >= 3 s) ─────────
   if (pcMode) {
     blePCMode();
-    oledMsg("LearnPod Ready", "Hold PTT", "to talk", FACE_IDLE);
+    oledMsg("LearnPod Ready", "Tap PTT", "3s hold = PC", FACE_IDLE);
     return;
   }
 
-  // ── AI ASSISTANT MODE ────────────────────────────────────────────────────
+  // ── AI ASSISTANT MODE (tap: speak after the release, VAD ends the clip) ──
   // 1+2+3. Record -> upload to server (STT+LLM+TTS) -> play streamed audio
   switchToMic();
-  if (!recordAudio()) return;
+  if (!recordAudioFree()) return;
 
-  if (!serverVoice()) {
-    oledMsg("LearnPod Ready", "Hold PTT", "to talk", FACE_IDLE);
-    return;
-  }
+  if (!serverVoice()) return;
 
-  oledMsg("LearnPod Ready", "Hold PTT", "to talk", FACE_IDLE);
 }

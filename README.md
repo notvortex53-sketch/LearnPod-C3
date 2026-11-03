@@ -209,20 +209,25 @@ Both variants behave identically — pick the file matching your board:
 
 Then:
 
-- **Hold the BOOT/FLASH button on boot** → WiFi Selector.
+- **Hold the BOOT/FLASH button ~2 s while the device is RUNNING** → WiFi Selector.
+  (Holding during power-up/reset enters ROM download mode instead — always
+  press the 2 s hold while the sketch is already running.)
 
 ### Controls (from the factory)
 
 | Action | What happens |
 |---|---|
 | **Say "Hey LearnPod" / "Hey Buddy"** + your question (hands-free, always armed) | device answers through the server: STT → LLM → TTS |
-| Short hold PTT (~1 s), release → AI mode | 🎙️ record → server full pipeline → speaker plays answer |
+| **Tap PTT (press & release), then speak** → AI mode | 🎙️ hands-free recording starts; ends on a **1 s pause** (or tap PTT again early) → server full pipeline → speaker plays the answer. Sentences can be any length — no holding needed |
 | Hold PTT 3 s+ → PC mode (BLE) | device advertises, PC app connects, hold PTT again to speak the command |
 | Hold FLASH/BOOT button on boot | 📶 WiFi selector |
 
+> ⚠️ Don't *hold* PTT while asking the AI a question — holding crosses into
+> PC mode at 3 s. **Tap and talk**: press, let go, then speak.
+
 ### Wake word details
 
-- Always listening while idle (PTT button keeps working exactly as before).
+- Always listening while idle (tap PTT keeps working exactly as before).
 - A ~2.5 s clip is uploaded on each speech burst; a false trigger is cheap and
   silent — the screen briefly shows "Not a wake word". Sensitivity is tuned
   inside `wakeStep()` (`WAKE_MIN_LEVEL`, `WAKE_RUN_FRAMES`).
