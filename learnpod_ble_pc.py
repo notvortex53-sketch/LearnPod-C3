@@ -3,8 +3,8 @@
 LearnPod BLE PC Controller — Windows
 Replaces the old learnpod_pc.py HTTP server with a Bluetooth LE link.
 
-The device advertises itself as "LearnPod-ESP32" exposing the standard
-Nordic_UART_Service (NUS):
+The device advertises itself as "LearnPod-C3" (ESP32-C3) or "LearnPod-ESP32"
+(classic ESP32), exposing the standard Nordic_UART_Service (NUS):
 
   service      6E400001-B5A3-F393-E0A9-E50E24DCCA9E
   TX (notify)  6E400002-...   device -> PC
@@ -34,7 +34,7 @@ from bleak import BleakClient, BleakScanner
 
 pyautogui.FAILSAFE = False  # disable the mouse-corner panic feature
 
-BLE_DEVICE_NAME = "LearnPod-ESP32"
+BLE_NAME_PREFIX = "LearnPod"  # matches LearnPod-C3, LearnPod-ESP32, ...
 NUS_TX_CHAR = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # device -> PC (notify)
 NUS_RX_CHAR = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # PC -> device (write)
 
@@ -217,21 +217,30 @@ class LearnPodBLE:
             print(f"  ! send failed: {e}")
 
 
+async def find_learnpod(timeout: float = 15.0):
+    """Scan for any LearnPod device (name starts with 'LearnPod')."""
+    devices = await BleakScanner.discover(timeout=timeout)
+    for d in devices:
+        if d.name and d.name.startswith(BLE_NAME_PREFIX):
+            return d
+    return None
+
+
 async def run() -> None:
     print("=== LearnPod BLE PC Controller ===")
-    print(f"Looking for Bluetooth device named '{BLE_DEVICE_NAME}'...")
+    print("Looking for any Bluetooth device starting with 'LearnPod'...")
     print("On the LearnPod: hold PTT ~3s to enter PC mode.\n")
 
     learnpod = LearnPodBLE()
 
     while True:
-        device = await BleakScanner.find_device_by_name(BLE_DEVICE_NAME, timeout=15)
+        device = await find_learnpod()
         if device is None:
             print("Device not advertising — will retry in 5s...")
             await asyncio.sleep(5)
             continue
 
-        print(f"Found {BLE_DEVICE_NAME}. Connecting...")
+        print(f"Found {device.name}. Connecting...")
         stop = asyncio.Event()
         try:
             async with BleakClient(

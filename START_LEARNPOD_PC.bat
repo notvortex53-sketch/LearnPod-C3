@@ -40,7 +40,26 @@ if errorlevel 1 (
     echo  Done!
 )
 
-REM ─── 3. Start the controller ─────────────────────────────────────────────────
+REM ─── 3. Make sure learnpod_ble_pc.py is next to this .bat ────────────────────
+if not exist "learnpod_ble_pc.py" (
+    echo  The controller file was not found next to this launcher.
+    echo  Trying to download it from GitHub automatically...
+    powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/notvortex53-sketch/LearnPod-C3/main/learnpod_ble_pc.py' -OutFile 'learnpod_ble_pc.py'; Write-Host 'Downloaded OK.' } catch { Write-Host ('Download failed: ' + $_.Exception.Message) }"
+)
+
+if not exist "learnpod_ble_pc.py" (
+    echo.
+    echo  [!] Could not get learnpod_ble_pc.py automatically.
+    echo      Fix: put BOTH files in the same folder:
+    echo        - START_LEARNPOD_PC.bat
+    echo        - learnpod_ble_pc.py
+    echo      (or let this PC use the internet and run this again)
+    echo.
+    pause
+    exit /b 1
+)
+
+REM ─── 4. Start the controller ─────────────────────────────────────────────────
 echo.
 echo  Ready. Starting the controller...
 echo.
@@ -54,7 +73,7 @@ echo  _______________________________________________
 echo.
 %PY% -u learnpod_ble_pc.py
 
-REM ─── 4. If the script crashed, keep the window open with the error ───────────
+REM ─── 5. If the script crashed, keep the window open with the error ───────────
 echo.
 echo  The controller stopped or crashed. The error is shown above.
 pause
