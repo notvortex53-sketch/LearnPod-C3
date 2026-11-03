@@ -57,7 +57,6 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#include "BluetoothA2DPSource.h"   // Library Manager: "ESP32-A2DP" by pschatzmann
 
 // ─── SERVER (Render) ─────────────────────────────────────────────────────────
 #define SERVER_HOST "learnpod-c3.onrender.com"   // your Render service URL
@@ -125,20 +124,6 @@ int       lastUsedIdx  = -1;  // index of last connected network
 // ─── GLOBALS ─────────────────────────────────────────────────────────────────
 uint8_t* audioBuf = nullptr;
 size_t   audioLen = 0;
-// Actual buffer capacity in SAMPLES (may shrink to 3 s when the Bluetooth
-// headphones stack is eating the heap).
-size_t audioBufCapSamples = SAMPLE_RATE * RECORD_SECONDS;
-
-// Allocate the record buffer once; cope with a tight heap gracefully.
-static bool ensureAudioBuf() {
-  if (audioBuf) return true;
-  audioBuf = (uint8_t*)malloc(MAX_AUDIO_BYTES);
-  if (audioBuf) { audioBufCapSamples = SAMPLE_RATE * RECORD_SECONDS; return true; }
-  // Bluetooth classic stack active? Retry with a 3 s buffer.
-  audioBuf = (uint8_t*)malloc(MAX_AUDIO_BYTES / 2);
-  if (audioBuf) { audioBufCapSamples = SAMPLE_RATE * RECORD_SECONDS / 2; return true; }
-  return false;
-}
 
 // BLE globals
 static BLEServer*          bleServer   = nullptr;
@@ -377,213 +362,7 @@ void saveWifiList() {
   prefs.end();
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// BLUETOOTH HEADPHONES / SPEAKER (A2DP source — classic ESP32 only)
-// ═════════════════════════════════════════════════════════════════════════════
-// The device connects TO your Bluetooth headphones/speaker and plays the bot's
-// voice there ("like headphones"). Library needed in Arduino IDE:
-//    Library Manager -> "ESP32-A2DP" by Phil Schatzmann
-//
-// UX:
-//   Hold PTT 8 s           -> pairing: scan nearby audio devices, tap PTT to
-//                             cycle, HOLD 1.5 s to connect & save
-//   Next boots             -> auto-connects to the saved headphones
-//   While connected        -> bot's voice plays on headphones (wired speaker
-//                             stays silent); unplug headphone battery or
-//                             re-pair by holding PTT 8 s again
-// ═════════════════════════════════════════════════════════════════════════════
-
-#define BT_HOLD_MS          8000   // PTT held this long opens BT pairing
-#define BT_SELECT_HOLD_MS   1500   // confirm selection in the picker
-#define BT_SCAN_SECS        20     // discovery window
-#define BT_SCAN_MAX         12     // remembered candidate devices
-#define BT_RING_SAMPLES     12288  // ~0.76 s of 16 kHz mono FIFO
-
-BluetoothA2DPSource a2dpSrc;
-
-static int16_t*  btRing          = nullptr;
-static volatile size_t btRingR   = 0;
-static volatile size_t btRingW   = 0;
-static volatile size_t btRingUsed = 0;
-static uint32_t  btResampleFrac  = 0;   // 16 kHz -> 44.1 kHz upsampler
-static int16_t   btLastSample    = 0;
-static volatile bool btSavedFlag = false; // connection state (from callback)
-static bool      btA2dpStarted   = false;
-static bool      btSession       = false; // pairing menu active
-static String    btSavedName     = "";
-static String    btScanList[BT_SCAN_MAX];
-static int       btScanCount     = 0;
-
-// Producer: loop task. Blocks while FIFO full (server stream is faster than
-// realtime playback), which also throttles the download.
-static void btRingWrite(const int16_t* src, size_t n) {
-  if (!btRing) return;
-  while (n > 0) {
-    size_t space = BT_RING_SAMPLES - btRingUsed;
-    if (space == 0) { delay(10); continue; }
-    size_t take = (n < space) ? n : space;
-    size_t w = btRingW;
-    for (size_t i = 0; i < take; i++) {
-      btRing[(w + i) % BT_RING_SAMPLES] = src[i];
-    }
-    btRingW = (w + take) % BT_RING_SAMPLES;
-    btRingUsed += take;
-    src += take;
-    n -= take;
-  }
-}
-
-// Consumer: A2DP callback task.
-static size_t btRingRead(int16_t* dst, size_t want) {
-  if (btRingUsed == 0 || !btRing) return 0;
-  size_t take = (want < btRingUsed) ? want : btRingUsed;
-  size_t r = btRingR;
-  for (size_t i = 0; i < take; i++) {
-    dst[i] = btRing[(r + i) % BT_RING_SAMPLES];
-  }
-  btRingR = (r + take) % BT_RING_SAMPLES;
-  btRingUsed -= take;
-  return take;
-}
-
-static void btRingReset() {
-  btRingR = 0; btRingW = 0; btRingUsed = 0;
-}
-
-// Data callback: fill 44.1 kHz stereo 16-bit frames from the 16 kHz mono FIFO.
-int32_t btSoundData(uint8_t* data, int32_t len) {
-  int32_t frames = len / 4;              // stereo, 2 bytes/ch
-  if (frames <= 0) return 0;
-  int16_t* out = (int16_t*)data;
-  static const uint32_t STEP_IN = 16000; // source sample rate
-  static const uint32_t STEP_OUT = 44100;
-  for (int32_t i = 0; i < frames; i++) {
-    btResampleFrac += STEP_IN;
-    int spins = 0;
-    while (btResampleFrac >= STEP_OUT && spins < 4) {
-      btResampleFrac -= STEP_OUT;
-      int16_t s;
-      if (btRingRead(&s, 1)) btLastSample = s;
-      spins++;
-    }
-    if (btRingUsed == 0) btLastSample = 0;   // smooth tail -> silence
-    out[2 * i] = btLastSample;
-    out[2 * i + 1] = btLastSample;
-  }
-  return len;
-}
-
-// Device discovery: while pairing we just RECORD names (return false keeps
-// scanning); outside pairing we auto-accept the saved headphones only.
-bool btSsidCallback(const char* ssid, esp_bd_addr_t addr, int rssi) {
-  (void)addr; (void)rssi;
-  String n = ssid;
-  if (!btSession) {
-    if (btSavedName.length() > 0 && n.startsWith(btSavedName)) return true;
-    return false;
-  }
-  for (int i = 0; i < btScanCount; i++) {
-    if (btScanList[i] == n) return false;
-  }
-  if (btScanCount < BT_SCAN_MAX) { btScanList[btScanCount++] = n; }
-  return false;
-}
-
-void btConnectionCallback(esp_a2d_connection_state_t st, void* obj) {
-  (void)obj;
-  btSavedFlag = (st == ESP_A2D_CONNECTION_STATE_CONNECTED);
-}
-
-// Whole pairing flow, blocking (only runs after an 8 s hold — user is waiting)
-void btAudioPair() {
-  btSession = true;
-  btScanCount = 0;
-  btSavedFlag = false;
-  btRingReset();
-  if (!btRing) {
-    btRing = (int16_t*)malloc(BT_RING_SAMPLES * sizeof(int16_t));
-    if (!btRing) { oledMsg("ERR: no memory", "", "", FACE_ERROR); btSession = false; delay(1500); return; }
-  }
-  oledMsg("BT Headphones", "Put headphones in", "pairing mode!");
-  delay(2000);
-
-  if (btA2dpStarted) {                 // re-pairing mid-session
-    a2dpSrc.cancel_discovery();
-    a2dpSrc.end(false);
-    btA2dpStarted = false;
-  }
-  a2dpSrc.start();                     // discovery, ssid_callback records list
-  btA2dpStarted = true;
-
-  String picked = "";
-  int idx = 0;
-  unsigned long startT = millis();
-  unsigned long tapStart = 0;
-  bool lastPTT = false;
-
-  while (true) {
-    if (btSavedFlag) break;            // callback already accepted a device
-
-    if (btScanCount == 0) {
-      if (millis() - startT > BT_SCAN_SECS * 1000) break;
-      oledMsg("BT Headphones", "Searching devices...");
-    } else {
-      oledMsg("BT: tap=next " + String(idx + 1) + "/" + String(btScanCount),
-              btScanList[idx], "HOLD 1.5s = connect");
-    }
-
-    // picker controls
-    bool p = (digitalRead(PTT_PIN) == LOW);
-    if (p && !lastPTT) tapStart = millis();
-    if (p && lastPTT && (millis() - tapStart >= BT_SELECT_HOLD_MS)) {
-      picked = btScanList[idx];
-      break;
-    }
-    if (!p && lastPTT) {
-      unsigned long d = millis() - tapStart;
-      if (d < 600 && btScanCount > 0) idx = (idx + 1) % btScanCount;
-    }
-    lastPTT = p;
-    delay(30);
-  }
-
-  if (picked.isEmpty()) {
-    a2dpSrc.cancel_discovery();
-    a2dpSrc.end(false);
-    btA2dpStarted = false;
-    btSession = false;
-    oledMsg("BT Headphones", "Found none", "Try again");
-    delay(2200);
-    return;
-  }
-
-  // Connect to the picked device by name
-  a2dpSrc.cancel_discovery();
-  delay(400);
-  a2dpSrc.end(false);
-  btA2dpStarted = false;
-
-  btSavedName = picked;
-  prefs.begin("learnpod", false);
-  prefs.putString("btname", btSavedName);
-  prefs.end();
-
-  a2dpSrc.start(btSavedName.c_str());
-  btA2dpStarted = true;
-
-  unsigned long waitT = millis();
-  while (!a2dpSrc.is_connected() && millis() - waitT < 12000) delay(200);
-
-  if (a2dpSrc.is_connected()) {
-    oledMsg("BT Connected!", btSavedName, "voice goes there");
-  } else {
-    oledMsg("BT: not connected", "Saved " + btSavedName, "will auto-connect");
-  }
-  delay(2500);
-  btSession = false;
-}
-
-
+// ─── WiFi selector request flags ──────────────────────────────────────────────
 // Holding the BOOT button across a RESET would put the ESP32 in ROM download
 // mode (sketch never runs). The reliable way: hold BOOT ~2 s while the device
 // is RUNNING -> set a flag in NVS -> reboot into the WiFi selector.
@@ -604,13 +383,6 @@ bool bootWifiSelectorFlag() {
     prefs.end();
   }
   return v;
-}
-
-// ─── BT headphones name load/save ─────────────────────────────────────────────
-void loadBtName() {
-  prefs.begin("learnpod", true);
-  btSavedName = prefs.getString("btname", "");
-  prefs.end();
 }
 
 void loadWifiList() {
@@ -860,13 +632,16 @@ void switchToAmp() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 bool recordAudio() {
-  if (!ensureAudioBuf()) { oledMsg("ERR: no memory"); return false; }
+  if (!audioBuf) {
+    audioBuf = (uint8_t*)malloc(MAX_AUDIO_BYTES);
+    if (!audioBuf) { oledMsg("ERR: no memory"); return false; }
+  }
   audioLen = 0;
   oledMsg("Recording...", "Release to send", "", FACE_LISTEN);
 
   int32_t raw32[DMA_BUF_LEN];
   int16_t* out16 = (int16_t*)audioBuf;
-  size_t   maxSamples = audioBufCapSamples;
+  size_t   maxSamples = SAMPLE_RATE * RECORD_SECONDS;
 
   while (digitalRead(PTT_PIN) == LOW && (audioLen / 2) < maxSamples) {
     size_t bytesRead = 0;
@@ -952,13 +727,7 @@ bool skipHttpHeaders(WiFiClientSecure& client, String& statusLine) {
 
 // Stream remaining client bytes to the amp (16-bit PCM 16 kHz)
 void streamPcmToSpeaker(WiFiClientSecure& client) {
-  bool useBT = btA2dpStarted && btRing && a2dpSrc.is_connected();
-
-  if (useBT) {
-    btRingReset();  // drop any stale audio from a previous stream
-  } else {
-    i2s_zero_dma_buffer(I2S_AMP_PORT);
-  }
+  i2s_zero_dma_buffer(I2S_AMP_PORT);
   delay(20);
 
   const size_t CHUNK = 512;
@@ -976,12 +745,8 @@ void streamPcmToSpeaker(WiFiClientSecure& client) {
         for (int i = 0; i < count; i++) {
           samples[i] = (int16_t)(samples[i] * 0.85f);
         }
-        if (useBT) {
-          btRingWrite(samples, count);   // paced: blocks while FIFO full
-        } else {
-          size_t written = 0;
-          i2s_write(I2S_AMP_PORT, chunk, got, &written, portMAX_DELAY);
-        }
+        size_t written = 0;
+        i2s_write(I2S_AMP_PORT, chunk, got, &written, portMAX_DELAY);
         lastData = millis();
       }
     } else if (!client.connected()) {
@@ -992,12 +757,8 @@ void streamPcmToSpeaker(WiFiClientSecure& client) {
     }
   }
   client.stop();
-  if (useBT) {
-    delay(400);  // let the BT FIFO drain out
-  } else {
-    delay(300);
-    i2s_zero_dma_buffer(I2S_AMP_PORT);
-  }
+  delay(300);
+  i2s_zero_dma_buffer(I2S_AMP_PORT);
 }
 
 // ─── AI mode: upload WAV to /voice, show captions, play server audio ─────────
@@ -1300,10 +1061,9 @@ void wakeStep() {
     wakeSpeechRun = speech ? (uint8_t)(wakeSpeechRun + 1) : 0;
     if (wakeSpeechRun >= WAKE_RUN_FRAMES) {
       // Triggered: ring already holds ~1.2 s of context (pre-roll)
-      if (!ensureAudioBuf()) {
-        wakeBackoffUntil = millis() + 4000;
-        wakePhase = WAKE_BACKOFF;
-        return;
+      if (!audioBuf) {
+        audioBuf = (uint8_t*)malloc(MAX_AUDIO_BYTES);
+        if (!audioBuf) { wakeBackoffUntil = millis() + 4000; wakePhase = WAKE_BACKOFF; return; }
       }
       wakeClipLen = wakeCopyRing((int16_t*)audioBuf);
       wakeSilenceRun = 0;
@@ -1312,8 +1072,8 @@ void wakeStep() {
     }
 
   } else if (wakePhase == WAKE_CAPTURE) {
-    // Append live audio into the clip: pre-roll + live = up to ~2.5 s
-    size_t space = (audioBufCapSamples * 2) - wakeClipLen;
+    // Append live audio into the clip: pre-roll + live = up to 2.5 s
+    size_t space = MAX_AUDIO_BYTES - wakeClipLen;
     size_t want  = (size_t)cnt * 2;
     size_t take  = (want > space) ? space : want;
     memcpy(audioBuf + wakeClipLen, (const uint8_t*)wakeFrame16, take);
@@ -1559,19 +1319,7 @@ void setup() {
   initMic();
   initAmp();   // classic ESP32: second I2S port for the speaker, always ready
 
-  // Bluetooth headphones: register callbacks once, auto-connect if saved
-  loadBtName();
-  a2dpSrc.set_ssid_callback(btSsidCallback);
-  a2dpSrc.set_data_callback(btSoundData);
-  a2dpSrc.set_on_connection_state_changed(btConnectionCallback, nullptr);
-  if (btSavedName.length() > 0) {
-    Serial.printf("BT: auto-connecting to %s\n", btSavedName.c_str());
-    a2dpSrc.set_auto_reconnect(true);
-    a2dpSrc.start(btSavedName.c_str());
-    btA2dpStarted = true;
-  }
-
-  oledMsg("LearnPod Ready", "Hold PTT", "8s=BT audio 3s=PC", FACE_IDLE);
+  oledMsg("LearnPod Ready", "Hold PTT", "to talk (BLE 3s=PC)", FACE_IDLE);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1622,27 +1370,15 @@ void loop() {
   // Measure how long PTT is held before release OR until PC_MODE_HOLD_MS
   unsigned long pressStart = millis();
   bool pcMode = false;
-  bool btMode = false;
 
   while (digitalRead(PTT_PIN) == LOW) {
     unsigned long held = millis() - pressStart;
-    if (held >= BT_HOLD_MS && !btMode && !pcMode) {
-      // 8 s -> Bluetooth headphones pairing (overrides PC mode)
-      btMode = true;
-      oledMsg("BT Headphones", "will pair after", "you release...", FACE_LISTEN);
-    } else if (held >= PC_MODE_HOLD_MS && !pcMode && !btMode) {
-      // 3 s -> switch to PC mode UI ("keep holding: BT audio at 8 s")
+    if (held >= PC_MODE_HOLD_MS && !pcMode) {
+      // Crossed threshold -> switch to PC mode UI
       pcMode = true;
-      oledMsg("PC Mode", "BLE starting...", "8s hold = BT audio", FACE_LISTEN);
+      oledMsg("PC Mode", "BLE starting...", "", FACE_LISTEN);
     }
     delay(10);
-  }
-
-  // ── BLUETOOTH HEADPHONES PAIRING ──────────────────────────────────────────
-  if (btMode) {
-    btAudioPair();
-    oledMsg("LearnPod Ready", "Hold PTT", "8s=BT audio 3s=PC", FACE_IDLE);
-    return;
   }
 
   // ── PC AUTOMATION MODE (over BLE) ─────────────────────────────────────────
