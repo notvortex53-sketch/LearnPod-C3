@@ -12,16 +12,47 @@ NEW:  ESP32 ── ONE HTTPS ──▶ Render server ──▶ STT + LLM + TTS �
 
 | File | What it is |
 |---|---|
-| `learnpod_c3_v5.ino` | Updated firmware (replace/supersede `learnpod_c3 (4).ino`) |
+| `learnpod_esp32_v6.ino` | Firmware for **classic ESP32** boards (Dev Module / D1 R32 / WROOM) |
+| `learnpod_c3_v5.ino` | Firmware for ESP32-**C3** Super Mini |
 | `server/main.py` | FastAPI backend — runs the full AI pipeline |
 | `server/requirements.txt` | Python deps for Render |
 | `server/render.yaml` | Optional Render Blueprint config |
 | `server/.env.example` | Key names (local testing only; use Render env vars) |
 | `learnpod_ble_pc.py` | Windows BLE PC controller (replaces `learnpod_pc.py`) |
+| `START_LEARNPOD_PC.bat` | One-click PC launcher (auto-installs everything) |
 
 ---
 
-## 0. Wiring (ESP32-C3 Super Mini)
+## 0. Wiring
+
+### 0a. Classic ESP32 (Dev Module / WROOM) — `learnpod_esp32_v6.ino`
+
+| Module | Module pin | ESP32 pin |
+|---|---|---|
+| INMP441 mic (I2S in) | VCC / GND | 3V3 / GND |
+| | SCK | **GPIO18** |
+| | WS | **GPIO19** |
+| | SD | **GPIO32** |
+| | L/R | **GND** (selects Left channel — required) |
+| MAX98357A amp (I2S out) | VIN / GND | 5V (or 3V3 — quieter) / GND |
+| | BCLK | **GPIO26** |
+| | LRC | **GPIO25** |
+| | DIN | **GPIO23** |
+| | GAIN | **GND** (12 dB) |
+| | Speaker + / − | speaker terminals |
+| SSD1306 OLED 128×64 (I2C) | VCC / GND | 3V3 / GND |
+| | SDA | **GPIO21** |
+| | SCL | **GPIO22** |
+| PTT button | legs | **GPIO4** ↔ GND *(internal pull-up — no resistor)* |
+
+Classic ESP32 bonus: the OLED sits on the normal I2C bus (21/22) — none of the
+C3 boot-strapping tricks, and both I2S mic and amp get **their own port**, so
+no driver swapping at all.
+
+> The BOOT button (GPIO0) is the WiFi-selector button on this board: hold it on
+> power-up for the WiFi Selector, exactly like the FLASH button on the C3.
+
+### 0b. ESP32-C3 Super Mini — `learnpod_c3_v5.ino`
 
 ```
                         ESP32-C3 Super Mini
@@ -159,11 +190,25 @@ PC → Device: {"cmd":"exec","ok":true,"message":"Opened Chrome"}
 
 ## 3. Firmware
 
-1. Open `learnpod_c3_v5.ino`.
-2. Set `SERVER_HOST` to your Render URL host (e.g. `learnpod-c3.onrender.com`).
-3. **No API keys in the firmware anymore.**
-4. Board: `ESP32C3 Dev Module`, enable **USB CDC On Boot**, Flash 4 MB.
-7. Flash. Then:
+Both variants behave identically — pick the file matching your board:
+
+**Classic ESP32 (Dev Module / WROOM):** `learnpod_esp32_v6.ino`
+
+1. Open `learnpod_esp32_v6.ino`.
+2. `SERVER_HOST` is already `learnpod-c3.onrender.com` — fine if that's your Render app.
+3. **No API keys in the firmware.**
+4. Board: `ESP32 Dev Module`.
+5. ⚠️ **Partition Scheme: `Huge APP (3MB No OTA/1MB SPIFFS)`** — required:
+   BLE + WiFi + TLS won't fit in the default 1.2 MB app partition.
+6. Flash. Then follow the controls below.
+
+**ESP32-C3 Super Mini:** `learnpod_c3_v5.ino`
+
+1. Board: `ESP32C3 Dev Module`, enable **USB CDC On Boot**, Flash 4 MB.
+
+Then:
+
+- **Hold the BOOT/FLASH button on boot** → WiFi Selector.
 
 ### Controls (from the factory)
 
@@ -172,7 +217,7 @@ PC → Device: {"cmd":"exec","ok":true,"message":"Opened Chrome"}
 | **Say "Hey LearnPod" / "Hey Buddy"** + your question (hands-free, always armed) | device answers through the server: STT → LLM → TTS |
 | Short hold PTT (~1 s), release → AI mode | 🎙️ record → server full pipeline → speaker plays answer |
 | Hold PTT 3 s+ → PC mode (BLE) | device advertises, PC app connects, hold PTT again to speak the command |
-| Hold FLASH on boot | 📶 WiFi selector |
+| Hold FLASH/BOOT button on boot | 📶 WiFi selector |
 
 ### Wake word details
 

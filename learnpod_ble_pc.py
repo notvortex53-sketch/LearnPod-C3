@@ -3,7 +3,7 @@
 LearnPod BLE PC Controller — Windows
 Replaces the old learnpod_pc.py HTTP server with a Bluetooth LE link.
 
-The ESP32-C3 advertises itself as "LearnPod-C3" exposing the standard
+The device advertises itself as "LearnPod-ESP32" exposing the standard
 Nordic_UART_Service (NUS):
 
   service      6E400001-B5A3-F393-E0A9-E50E24DCCA9E
@@ -34,7 +34,7 @@ from bleak import BleakClient, BleakScanner
 
 pyautogui.FAILSAFE = False  # disable the mouse-corner panic feature
 
-BLE_DEVICE_NAME = "LearnPod-C3"
+BLE_DEVICE_NAME = "LearnPod-ESP32"
 NUS_TX_CHAR = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # device -> PC (notify)
 NUS_RX_CHAR = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # PC -> device (write)
 

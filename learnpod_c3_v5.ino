@@ -24,9 +24,9 @@
  *   MAX98357A amp: BCLK=GPIO4 LRC=GPIO3 DIN=GPIO2  GAIN->GND (12dB)
  *   SSD1306 OLED : SDA=GPIO8  SCL=GPIO9  (I2C)
  *   PTT button   : GPIO10 -> GND (INPUT_PULLUP)
- *   FLASH button : GPIO9 (built-in) — hold on boot -> WiFi Selector
+ *   FLASH button : GPIO9 (built-in) — hold 2 s while running -> WiFi Selector
  *
- * WiFi Selector (hold FLASH on boot):
+ * WiFi Selector (hold FLASH 2 s while the device is running):
  *   - Scroll networks: short-press PTT
  *   - Connect:         hold PTT (1.5 s)
  *   - Add network:     send "ADD:ssid:password" over Serial (115200)
@@ -361,6 +361,29 @@ void saveWifiList() {
   prefs.end();
 }
 
+// ─── WiFi selector request flags ──────────────────────────────────────────────
+// Holding FLASH/BOOT across a RESET puts the ESP32-C3 in ROM download mode
+// (sketch never runs). The reliable way: hold it ~2 s while the device is
+// running -> set a flag in NVS -> reboot into the WiFi selector.
+void requestWifiSelector() {
+  prefs.begin("learnpod", false);
+  prefs.putBool("selboot", true);
+  prefs.end();
+  ESP.restart();
+}
+
+bool bootWifiSelectorFlag() {
+  prefs.begin("learnpod", true);
+  bool v = prefs.getBool("selboot", false);
+  prefs.end();
+  if (v) {                              // consume the request
+    prefs.begin("learnpod", false);
+    prefs.putBool("selboot", false);
+    prefs.end();
+  }
+  return v;
+}
+
 void loadWifiList() {
   prefs.begin("learnpod", true);  // read-only
   wifiCount   = prefs.getInt("count", 0);
@@ -443,7 +466,7 @@ bool autoConnect() {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // WiFi SELECTOR MODE
-// Entered when FLASH button held at boot.
+// Entered via a 2 s hold of the FLASH button while running (requestWifiSelector).
 // PTT short press = next network
 // PTT held 1.5 s  = connect to highlighted network
 // Serial "ADD:ssid:password" = add network
@@ -1251,10 +1274,12 @@ void setup() {
   loadWifiList();
   Serial.printf("Loaded %d network(s) from NVS\n", wifiCount);
 
-  // Check if FLASH button held at boot -> WiFi Selector mode
-  if (digitalRead(FLASH_BTN) == LOW) {
+  // WiFi Selector: enters if a 2 s FLASH hold (while running) rebooted us, or
+  // if the button happens to be low at boot on boards that reach this point.
+  bool selRequested = bootWifiSelectorFlag();
+  if (selRequested || digitalRead(FLASH_BTN) == LOW) {
     delay(80);  // debounce
-    if (digitalRead(FLASH_BTN) == LOW) {
+    if (selRequested || digitalRead(FLASH_BTN) == LOW) {
       Serial.println("Entering WiFi Selector mode");
       wifiSelectorMode();
       // Falls through after successful connect
@@ -1262,7 +1287,7 @@ void setup() {
   } else {
     // Auto-connect to last used / first saved network
     if (wifiCount == 0) {
-      oledMsg("No WiFi saved!", "Hold FLASH btn", "on boot to add");
+      oledMsg("No WiFi saved!", "Hold FLASH 2s", "while running");
       Serial.println("No networks saved. Send ADD:ssid:pass via Serial.");
       while (WiFi.status() != WL_CONNECTED) {
         if (Serial.available()) {
@@ -1281,7 +1306,7 @@ void setup() {
       }
     } else {
       if (!autoConnect()) {
-        oledMsg("Auto-connect fail", "Hold FLASH btn", "to pick network");
+        oledMsg("Auto-connect fail", "Hold FLASH 2s", "while running");
         delay(3000);
         wifiSelectorMode();
       }
@@ -1302,6 +1327,20 @@ void setup() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void loop() {
+  // FLASH button held ~2 s while RUNNING -> reboot into WiFi Selector.
+  // (Holding it across a reset enters ROM download mode instead, so we do it
+  // this way: flag in NVS, restart, selector.)
+  static uint32_t bootHoldStart = 0;
+  if (digitalRead(FLASH_BTN) == LOW) {
+    if (bootHoldStart == 0) bootHoldStart = millis();
+    else if (millis() - bootHoldStart > 2000) {
+      oledMsg("WiFi Selector", "rebooting...", "");
+      requestWifiSelector();
+    }
+  } else {
+    bootHoldStart = 0;
+  }
+
   // Serial: add network at runtime (useful without rebooting)
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
