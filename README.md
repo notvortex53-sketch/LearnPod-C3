@@ -12,7 +12,7 @@ NEW:  ESP32 ── ONE HTTPS ──▶ Render server ──▶ STT + LLM + TTS �
 
 | File | What it is |
 |---|---|
-| `learnpod_esp32_v6.ino` | Firmware for **classic ESP32** boards (Dev Module / D1 R32 / WROOM) |
+| `LearnPod32/LearnPod32.ino` | Firmware for **classic ESP32** boards (Dev Module / D1 R32 / WROOM) |
 | `learnpod_c3_v5.ino` | Firmware for ESP32-**C3** Super Mini |
 | `server/main.py` | FastAPI backend — runs the full AI pipeline |
 | `server/requirements.txt` | Python deps for Render |
@@ -25,7 +25,7 @@ NEW:  ESP32 ── ONE HTTPS ──▶ Render server ──▶ STT + LLM + TTS �
 
 ## 0. Wiring
 
-### 0a. Classic ESP32 (Dev Module / WROOM) — `learnpod_esp32_v6.ino`
+### 0a. Classic ESP32 (Dev Module / WROOM) — `LearnPod32/LearnPod32.ino`
 
 | Module | Module pin | ESP32 pin |
 |---|---|---|
@@ -192,9 +192,10 @@ PC → Device: {"cmd":"exec","ok":true,"message":"Opened Chrome"}
 
 Both variants behave identically — pick the file matching your board:
 
-**Classic ESP32 (Dev Module / WROOM):** `learnpod_esp32_v6.ino`
+**Classic ESP32 (Dev Module / WROOM):** `LearnPod32/LearnPod32.ino`
 
-1. Open `learnpod_esp32_v6.ino`.
+1. Open `LearnPod32/LearnPod32.ino` (the sketch folder is named to match the
+   sketch — Arduino IDE requirement).
 2. `SERVER_HOST` is already `learnpod-c3.onrender.com` — fine if that's your Render app.
 3. **No API keys in the firmware.**
 4. Board: `ESP32 Dev Module`.
